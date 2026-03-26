@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IMAGE_NAME="claude-dev"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load machine-specific config
+if [[ -f "$SCRIPT_DIR/config.sh" ]]; then
+    source "$SCRIPT_DIR/config.sh"
+else
+    echo "Error: config.sh not found. Copy config.example.sh to config.sh and customize." >&2
+    echo "  cp $SCRIPT_DIR/config.example.sh $SCRIPT_DIR/config.sh" >&2
+    exit 1
+fi
+
+usage() {
+    echo "Usage: claude-in-container <project> [claude args...]"
+    echo ""
+    echo "Projects:"
+    for key in "${!PROJECTS[@]}"; do
+        echo "  $key  ->  ${PROJECTS[$key]}"
+    done
+    echo ""
+    echo "Examples:"
+    echo "  claude-in-container rr"
+    echo "  claude-in-container evenplay 'fix the login bug'"
+    echo ""
+    echo "Other commands:"
+    echo "  claude-in-container --build                Rebuild the Docker image"
+    echo "  claude-in-container --login <project>      Run claude auth login in the container"
+    echo "  claude-in-container --shell <project>      Open a bash shell in the container"
+    echo "  claude-in-container --worktree <project> <name>  Spawn instance on a new git worktree"
+    echo "  claude-in-container --list                 List running claude containers"
+    echo ""
+    echo "Multiple instances:"
+    echo "  claude-in-container --worktree evenplay wallet-fix"
+    echo "  claude-in-container --worktree evenplay auth-refactor"
+    exit 1
+}
+
+build_image() {
+    echo "Building $IMAGE_NAME image..."
+    docker build \
+        --build-arg HOST_UID="$(id -u)" \
+        --build-arg HOST_GID="$(id -g)" \
+        --build-arg DOCKER_GID="$(getent group docker | cut -d: -f3)" \
+        -t "$IMAGE_NAME" \
+        "$SCRIPT_DIR"
+}
+
+ensure_image() {
+    if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+        echo "Image $IMAGE_NAME not found, building..."
+        build_image
+    fi
+}
+
+resolve_project() {
+    local key="$1"
+    if [[ -n "${PROJECTS[$key]+x}" ]]; then
+        echo "${PROJECTS[$key]}"
+    else
+        echo "Unknown project: $key" >&2
+        echo "" >&2
+        usage
+    fi
+}
+
+run_container() {
+    local project_key="$1"
+    shift
+    local project_dir
+    project_dir="$(resolve_project "$project_key")"
+    local full_path="$PROJECTS_DIR/$project_dir"
+
+    if [[ ! -d "$full_path" ]]; then
+        echo "Error: project directory $full_path does not exist" >&2
+        exit 1
+    fi
+
+    ensure_image
+
+    # Instance name — default or worktree-specific
+    local instance="${INSTANCE_NAME:-}"
+    local container_name="claude-${project_key}${instance:+-$instance}"
+
+    # Each project gets its own claude config volume for separate logins
+    # (worktree instances share the project's Claude account)
+    local config_vol="claude-config-${project_key}"
+
+    # If worktree mode, create a worktree branched from main (fresh)
+    if [[ "${MODE:-}" == "worktree" ]] && [[ -n "$instance" ]]; then
+        local wt_path="$PROJECTS_DIR/${project_dir}-wt-${instance}"
+        if [[ ! -d "$wt_path" ]]; then
+            # Fetch latest main first
+            echo "Fetching latest main..."
+            git -C "$full_path" fetch origin main 2>/dev/null || true
+            echo "Creating worktree: $wt_path (branch: $instance from origin/main)"
+            git -C "$full_path" worktree add "$wt_path" -b "$instance" origin/main 2>/dev/null \
+                || git -C "$full_path" worktree add "$wt_path" "$instance"
+        else
+            echo "Using existing worktree: $wt_path"
+        fi
+        full_path="$wt_path"
+    fi
+
+    local extra_flags=()
+
+    # Handle special modes
+    if [[ "${MODE:-}" == "login" ]]; then
+        extra_flags+=("--entrypoint" "entrypoint.sh")
+        set -- "setup-token"
+    elif [[ "${MODE:-}" == "shell" ]]; then
+        extra_flags+=("--entrypoint" "/bin/bash")
+        set --
+    else
+        # Prompt for permission mode (default: skip permissions since it's containerized)
+        read -r -p "Skip permissions? [Y/n] " answer </dev/tty
+        if [[ "${answer,,}" != "n" ]]; then
+            set -- --dangerously-skip-permissions "$@"
+        fi
+    fi
+
+    # Mount host credentials read-only (shared across all projects)
+    local host_mounts=()
+
+    # Git config
+    [[ -f "$HOME/.gitconfig" ]] && \
+        host_mounts+=(-v "$HOME/.gitconfig":/home/claude/.gitconfig:ro)
+
+    # SSH keys (for git over SSH)
+    [[ -d "$HOME/.ssh" ]] && \
+        host_mounts+=(-v "$HOME/.ssh":/home/claude/.ssh:ro)
+
+    # GitHub CLI auth — token file takes priority, falls back to config dir
+    # Create token file with: gh auth token > ~/.config/gh/token
+    if [[ -f "$HOME/.config/gh/token" ]]; then
+        host_mounts+=(-e "GH_TOKEN=$(cat "$HOME/.config/gh/token")")
+    fi
+    [[ -d "$HOME/.config/gh" ]] && \
+        host_mounts+=(-v "$HOME/.config/gh":/home/claude/.config/gh:ro)
+
+    # Docker socket (for managing devcontainers / compose stacks)
+    [[ -S /var/run/docker.sock ]] && \
+        host_mounts+=(-v /var/run/docker.sock:/var/run/docker.sock)
+
+    # Docker config (for container registries)
+    [[ -d "$HOME/.docker" ]] && \
+        host_mounts+=(-v "$HOME/.docker":/home/claude/.docker:ro)
+
+    # GCloud (if present)
+    [[ -d "$HOME/.config/gcloud" ]] && \
+        host_mounts+=(-v "$HOME/.config/gcloud":/home/claude/.config/gcloud:ro)
+
+    # AWS (if present)
+    [[ -d "$HOME/.aws" ]] && \
+        host_mounts+=(-v "$HOME/.aws":/home/claude/.aws:ro)
+
+    # SSH agent forwarding (if running)
+    if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
+        host_mounts+=(-v "$SSH_AUTH_SOCK":/tmp/ssh-agent.sock)
+        host_mounts+=(-e SSH_AUTH_SOCK=/tmp/ssh-agent.sock)
+    fi
+
+    # Shared Claude roles (read-only)
+    local roles_mounts=()
+    if [[ -d "$ROLES_DIR" ]]; then
+        roles_mounts+=(-v "$ROLES_DIR":/workspace/.claude/roles:ro)
+    fi
+
+    # Forecast CLI — mount binary + per-project config
+    local forecast_mounts=()
+    local forecast_bin="${FORECAST_BIN:-}"
+    if [[ -n "$forecast_bin" && -f "$forecast_bin" ]]; then
+        forecast_mounts+=(-v "$forecast_bin":/usr/local/bin/forecast:ro)
+        # Mount project-specific .forecast config if it exists
+        local forecast_cfg="$full_path/.forecast"
+        if [[ -d "$forecast_cfg" ]]; then
+            forecast_mounts+=(-v "$forecast_cfg":/workspace/.forecast:ro)
+        fi
+    fi
+
+    # If workspace is a git worktree, the .git file contains an absolute path
+    # back to the main repo's .git dir. Mount it at the same absolute path
+    # so the reference resolves inside the container.
+    local git_mounts=()
+    if [[ -f "$full_path/.git" ]]; then
+        local main_git_dir
+        main_git_dir=$(cd "$full_path" && git rev-parse --git-common-dir 2>/dev/null)
+        if [[ -n "$main_git_dir" && -d "$main_git_dir" ]]; then
+            main_git_dir=$(cd "$full_path" && cd "$main_git_dir" && pwd)
+            # Mount at the same absolute path so worktree gitdir references work
+            git_mounts+=(-v "$main_git_dir":"$main_git_dir")
+        fi
+    fi
+
+    # Remove any stopped container with the same name
+    docker rm "$container_name" &>/dev/null || true
+
+    exec docker run --rm -it \
+        --name "$container_name" \
+        -v "$full_path":/workspace \
+        "${git_mounts[@]}" \
+        -v "${config_vol}":/home/claude/.claude \
+        "${host_mounts[@]}" \
+        "${roles_mounts[@]}" \
+        "${forecast_mounts[@]}" \
+        -e TERM="${TERM:-xterm-256color}" \
+        "${extra_flags[@]}" \
+        "$IMAGE_NAME" \
+        "$@"
+}
+
+# --- Main ---
+
+if [[ $# -eq 0 ]]; then
+    usage
+fi
+
+case "$1" in
+    --build)
+        build_image
+        ;;
+    --login)
+        [[ $# -lt 2 ]] && usage
+        MODE=login run_container "$2"
+        ;;
+    --shell)
+        [[ $# -lt 2 ]] && usage
+        MODE=shell run_container "$2"
+        ;;
+    --worktree)
+        [[ $# -lt 3 ]] && { echo "Usage: claude-in-container --worktree <project> <name> [claude args...]"; exit 1; }
+        project="$2"
+        INSTANCE_NAME="$3"
+        shift 3
+        MODE=worktree run_container "$project" "$@"
+        ;;
+    --list)
+        docker ps --filter "name=claude-" --format "table {{.Names}}\t{{.Status}}\t{{.RunningFor}}"
+        ;;
+    -h|--help)
+        usage
+        ;;
+    *)
+        run_container "$@"
+        ;;
+esac
