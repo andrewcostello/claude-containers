@@ -2,7 +2,7 @@
 set -euo pipefail
 
 IMAGE_NAME="claude-dev"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 # Load machine-specific config
 if [[ -f "$SCRIPT_DIR/config.sh" ]]; then
