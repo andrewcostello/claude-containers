@@ -202,6 +202,12 @@ run_container() {
         fi
     fi
 
+    # Secrets env file (JIRA_API_TOKEN, etc.)
+    local secrets_env_flag=()
+    if [[ -f "$SCRIPT_DIR/secrets.env" ]]; then
+        secrets_env_flag+=(--env-file "$SCRIPT_DIR/secrets.env")
+    fi
+
     # Remove any stopped container with the same name
     docker rm "$container_name" &>/dev/null || true
 
@@ -213,6 +219,7 @@ run_container() {
         "${host_mounts[@]}" \
         "${roles_mounts[@]}" \
         "${forecast_mounts[@]}" \
+        ${secrets_env_flag[@]+"${secrets_env_flag[@]}"} \
         -e TERM="${TERM:-xterm-256color}" \
         "${extra_flags[@]}" \
         "$IMAGE_NAME" \
