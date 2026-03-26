@@ -63,6 +63,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends sudo \
 RUN mkdir -p /home/claude/.claude && chown -R ${HOST_UID}:${HOST_GID} /home/claude/.claude
 
 # Entrypoint that fixes volume ownership then execs claude
+# Gemini CLI (for multi-model reviews)
+RUN npm install -g @google/gemini-cli
+
+# OpenAI Codex CLI (for multi-model reviews)
+RUN npm install -g @openai/codex
+
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 USER claude

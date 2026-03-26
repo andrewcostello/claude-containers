@@ -140,6 +140,14 @@ run_container() {
     [[ -d "$HOME/.config/gh" ]] && \
         host_mounts+=(-v "$HOME/.config/gh":/home/claude/.config/gh:ro)
 
+    # Gemini CLI auth (OAuth credentials)
+    [[ -d "$HOME/.gemini" ]] && \
+        host_mounts+=(-v "$HOME/.gemini":/home/claude/.gemini:ro)
+
+    # OpenAI Codex CLI auth
+    [[ -d "$HOME/.codex" ]] && \
+        host_mounts+=(-v "$HOME/.codex":/home/claude/.codex:ro)
+
     # Docker socket (for managing devcontainers / compose stacks)
     [[ -S /var/run/docker.sock ]] && \
         host_mounts+=(-v /var/run/docker.sock:/var/run/docker.sock)
