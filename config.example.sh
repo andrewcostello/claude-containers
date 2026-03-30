@@ -19,3 +19,14 @@ ROLES_DIR="$PROJECTS_DIR/claude-roles"
 
 # Forecast CLI binary path (set to "" to disable)
 FORECAST_BIN="$PROJECTS_DIR/forecast/forecast"
+
+# Resource limits (optional — these are the defaults)
+# CONTAINER_MEMORY="8g"
+# CONTAINER_CPUS="4"
+
+# Mount Docker socket by default (set to "true" if most projects need it)
+# Can always override per-launch with --docker flag
+# MOUNT_DOCKER_SOCKET="false"
+
+# Projects that always need the Docker socket (e.g., for devcontainers / compose)
+# DOCKER_PROJECTS=("evenplay" "rr")

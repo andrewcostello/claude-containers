@@ -13,12 +13,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     unzip \
     openssh-client \
+    iproute2 \
+    lsof \
+    procps \
+    psmisc \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 20 (matches host)
+# Node.js 20 (matches host) + corepack for pnpm/yarn support
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && corepack enable
 
 # golangci-lint
 RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
@@ -28,6 +33,12 @@ RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/i
 RUN ARCH=$(uname -m | sed 's/aarch64/aarch64/;s/x86_64/x86_64/') && \
     curl -sSL "https://github.com/bufbuild/buf/releases/latest/download/buf-Linux-${ARCH}" \
     -o /usr/local/bin/buf && chmod +x /usr/local/bin/buf
+
+# protoc + gRPC-Web plugins (for proto code generation)
+# Installs protoc-gen-js and protoc-gen-grpc-web on PATH by exact name
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g protoc-gen-js protoc-gen-grpc-web
 
 # GitHub CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -74,9 +85,31 @@ RUN npm install -g @google/gemini-cli
 # OpenAI Codex CLI (for multi-model reviews)
 RUN npm install -g @openai/codex
 
+# kubectl
+RUN curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+    -o /usr/local/bin/kubectl && chmod +x /usr/local/bin/kubectl
+
+# Tilt (local Kubernetes dev)
+RUN curl -fsSL https://raw.githubusercontent.com/tilt-dev/tilt/master/scripts/install.sh | bash
+
+# Playwright browser dependencies (Chromium + Firefox headless testing)
+# Uses Playwright's own dependency installer to stay in sync with browser requirements
+RUN npx -y playwright install-deps chromium firefox
+
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 USER claude
+
+# Pre-install Playwright browsers (runtime cache volume keeps them across containers)
+RUN npx -y playwright install chromium firefox
+
+# Project-colored shell prompt (uses CLAUDE_PROJECT env var set at runtime)
+RUN echo 'if [ -n "${CLAUDE_PROJECT:-}" ]; then' >> /home/claude/.bashrc \
+    && echo '    _hash=$(printf "%s" "$CLAUDE_PROJECT" | cksum | cut -d" " -f1)' >> /home/claude/.bashrc \
+    && echo '    _color=$(( (_hash % 6) + 31 ))' >> /home/claude/.bashrc \
+    && echo '    PS1="\\[\\033[1;${_color}m\\][${CLAUDE_PROJECT}]\\[\\033[0m\\] \\w\\$ "' >> /home/claude/.bashrc \
+    && echo '    unset _hash _color' >> /home/claude/.bashrc \
+    && echo 'fi' >> /home/claude/.bashrc
 
 # Claude Code (native installer)
 ENV PATH="/home/claude/.local/bin:${PATH}"

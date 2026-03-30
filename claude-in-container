@@ -13,8 +13,13 @@ else
     exit 1
 fi
 
+# Configurable defaults (override in config.sh)
+CONTAINER_MEMORY="${CONTAINER_MEMORY:-8g}"
+CONTAINER_CPUS="${CONTAINER_CPUS:-4}"
+MOUNT_DOCKER_SOCKET="${MOUNT_DOCKER_SOCKET:-false}"
+
 usage() {
-    echo "Usage: claude-in-container <project> [claude args...]"
+    echo "Usage: claude-in-container [flags] <project> [claude args...]"
     echo ""
     echo "Projects:"
     for key in "${!PROJECTS[@]}"; do
@@ -24,13 +29,21 @@ usage() {
     echo "Examples:"
     echo "  claude-in-container rr"
     echo "  claude-in-container evenplay 'fix the login bug'"
+    echo "  claude-in-container --docker evenplay   # mount Docker socket"
     echo ""
-    echo "Other commands:"
+    echo "Modifier flags (combine before command/project):"
+    echo "  --docker                 Mount Docker socket (for devcontainers)"
+    echo "  --host-network           Use host network (for tilt/k8s port-forwards)"
+    echo "  --offline                Disable network access"
+    echo ""
+    echo "Commands:"
     echo "  claude-in-container --build                Rebuild the Docker image"
     echo "  claude-in-container --login <project>      Run claude auth login in the container"
     echo "  claude-in-container --shell <project>      Open a bash shell in the container"
     echo "  claude-in-container --worktree <project> <name>  Spawn instance on a new git worktree"
     echo "  claude-in-container --list                 List running claude containers"
+    echo "  claude-in-container --stop <project> <name>  Stop worktree + clean up everything"
+    echo "  claude-in-container --prune <project>      Remove all stale worktrees and branches"
     echo ""
     echo "Multiple instances:"
     echo "  claude-in-container --worktree evenplay wallet-fix"
@@ -66,6 +79,127 @@ resolve_project() {
     fi
 }
 
+prune_worktrees() {
+    local project_key="$1"
+    local project_dir
+    project_dir="$(resolve_project "$project_key")"
+    local full_path="$PROJECTS_DIR/$project_dir"
+
+    if [[ ! -d "$full_path" ]]; then
+        echo "Error: project directory $full_path does not exist" >&2
+        exit 1
+    fi
+
+    echo "Pruning stale worktrees for $project_key..."
+
+    # Let git clean up any worktrees whose directories were already removed
+    git -C "$full_path" worktree prune
+
+    # Find worktree directories matching this project's pattern
+    local wt_prefix="$PROJECTS_DIR/${project_dir}-wt-"
+    local found=0
+    for wt_path in "${wt_prefix}"*/; do
+        [[ -d "$wt_path" ]] || continue
+        found=1
+        local wt_name
+        wt_name=$(basename "$wt_path")
+        local branch="${wt_name#"${project_dir}-wt-"}"
+
+        # Check if there's a running container for this worktree
+        local container_name="claude-${project_key}-${branch}"
+        if docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
+            echo "  SKIP  $wt_name (container running)"
+            continue
+        fi
+
+        read -r -p "  Remove worktree $wt_name and branch $branch? [y/N] " answer </dev/tty
+        if [[ "${answer,,}" == "y" ]]; then
+            git -C "$full_path" worktree remove "$wt_path" 2>/dev/null \
+                || rm -rf "$wt_path" 2>/dev/null \
+                || sudo rm -rf "$wt_path"
+            git -C "$full_path" branch -d "$branch" 2>/dev/null \
+                && echo "    Removed worktree + branch: $branch" \
+                || echo "    Removed worktree (branch $branch not fully merged, kept)"
+            # Clean up instance config volume
+            local vol_name="claude-config-${project_key}-${branch}"
+            docker volume rm "$vol_name" 2>/dev/null \
+                && echo "    Removed volume: $vol_name" || true
+        fi
+    done
+
+    if [[ $found -eq 0 ]]; then
+        echo "  No worktrees found for $project_key"
+    fi
+}
+
+stop_worktree() {
+    local project_key="$1"
+    local instance="$2"
+    local project_dir
+    project_dir="$(resolve_project "$project_key")"
+    local full_path="$PROJECTS_DIR/$project_dir"
+    local container_name="claude-${project_key}-${instance}"
+    local wt_path="$PROJECTS_DIR/${project_dir}-wt-${instance}"
+    local vol_name="claude-config-${project_key}-${instance}"
+
+    # Stop container if running
+    if docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
+        echo "Stopping container $container_name..."
+        docker stop "$container_name" >/dev/null 2>&1 || true
+    fi
+
+    # Remove worktree directory
+    if [[ -d "$wt_path" ]]; then
+        echo "Removing worktree $wt_path..."
+        git -C "$full_path" worktree remove "$wt_path" 2>/dev/null \
+            || rm -rf "$wt_path" 2>/dev/null \
+            || sudo rm -rf "$wt_path"
+    fi
+
+    # Prune git worktree references
+    git -C "$full_path" worktree prune 2>/dev/null || true
+
+    # Delete branch (warn if not merged)
+    if git -C "$full_path" rev-parse --verify "$instance" &>/dev/null; then
+        git -C "$full_path" branch -d "$instance" 2>/dev/null \
+            && echo "Deleted branch: $instance" \
+            || echo "Branch $instance not fully merged (kept). Use 'git branch -D $instance' to force-delete."
+    fi
+
+    # Remove instance config volume
+    if docker volume inspect "$vol_name" &>/dev/null; then
+        echo "Removing volume $vol_name..."
+        docker volume rm "$vol_name" >/dev/null 2>&1 || true
+    fi
+
+    echo "Done."
+}
+
+list_containers() {
+    local containers
+    containers=$(docker ps --filter "name=claude-" --format "{{.Names}}|{{.Status}}|{{.RunningFor}}" 2>/dev/null)
+
+    if [[ -z "$containers" ]]; then
+        echo "No running claude containers."
+        return
+    fi
+
+    # Header
+    printf "\033[1m%-30s %-20s %s\033[0m\n" "CONTAINER" "STATUS" "RUNNING"
+    echo "────────────────────────────────────────────────────────────────"
+
+    while IFS='|' read -r name status running; do
+        # Extract project key from container name (claude-<project>[-instance])
+        local project_key="${name#claude-}"
+        local base_project="${project_key%%-*}"
+        local hash_val
+        hash_val=$(printf '%s' "$base_project" | cksum | cut -d' ' -f1)
+        local color_code=$(( (hash_val % 6) + 31 ))
+
+        printf "\033[1;${color_code}m%-30s\033[0m %-20s %s\n" "$name" "$status" "$running"
+    done <<< "$containers"
+}
+
 run_container() {
     local project_key="$1"
     shift
@@ -84,9 +218,12 @@ run_container() {
     local instance="${INSTANCE_NAME:-}"
     local container_name="claude-${project_key}${instance:+-$instance}"
 
-    # Each project gets its own claude config volume for separate logins
-    # (worktree instances share the project's Claude account)
-    local config_vol="claude-config-${project_key}"
+    # Base project gets claude-config-<project>. Worktree instances get their
+    # own volume (claude-config-<project>-<instance>) to avoid session conflicts.
+    # The base volume is also mounted read-only at ~/.claude-base so the
+    # entrypoint can clone auth+settings into fresh instance volumes.
+    local base_config_vol="claude-config-${project_key}"
+    local config_vol="claude-config-${project_key}${instance:+-$instance}"
 
     # If worktree mode, create a worktree branched from main (fresh)
     if [[ "${MODE:-}" == "worktree" ]] && [[ -n "$instance" ]]; then
@@ -108,8 +245,10 @@ run_container() {
 
     # Handle special modes
     if [[ "${MODE:-}" == "login" ]]; then
+        # Generate a long-lived OAuth token and add it to secrets.env
         extra_flags+=("--entrypoint" "entrypoint.sh")
         set -- "setup-token"
+        echo "Tip: Add the generated token to secrets.env as CLAUDE_CODE_OAUTH_TOKEN=<token>"
     elif [[ "${MODE:-}" == "shell" ]]; then
         extra_flags+=("--entrypoint" "/bin/bash")
         set --
@@ -148,21 +287,36 @@ run_container() {
     [[ -d "$HOME/.codex" ]] && \
         host_mounts+=(-v "$HOME/.codex":/home/claude/.codex:ro)
 
-    # Docker socket (for managing devcontainers / compose stacks)
-    [[ -S /var/run/docker.sock ]] && \
-        host_mounts+=(-v /var/run/docker.sock:/var/run/docker.sock)
-
-    # Docker config (for container registries)
-    [[ -d "$HOME/.docker" ]] && \
-        host_mounts+=(-v "$HOME/.docker":/home/claude/.docker:ro)
+    # Docker socket (only when explicitly requested — it grants host-level access)
+    # Enable via: --docker flag, MOUNT_DOCKER_SOCKET=true, or per-project DOCKER_PROJECTS
+    local needs_docker="${DOCKER_SOCKET}"
+    if [[ "$needs_docker" != "true" ]] && declare -p DOCKER_PROJECTS &>/dev/null; then
+        for dp in "${DOCKER_PROJECTS[@]}"; do
+            [[ "$dp" == "$project_key" ]] && needs_docker=true && break
+        done
+    fi
+    if [[ "$needs_docker" == "true" ]]; then
+        [[ -S /var/run/docker.sock ]] && \
+            host_mounts+=(-v /var/run/docker.sock:/var/run/docker.sock)
+        [[ -d "$HOME/.docker" ]] && \
+            host_mounts+=(-v "$HOME/.docker":/home/claude/.docker:ro)
+    fi
 
     # GCloud (if present)
     [[ -d "$HOME/.config/gcloud" ]] && \
         host_mounts+=(-v "$HOME/.config/gcloud":/home/claude/.config/gcloud:ro)
 
-    # AWS (if present)
-    [[ -d "$HOME/.aws" ]] && \
-        host_mounts+=(-v "$HOME/.aws":/home/claude/.aws:ro)
+    # AWS — config/credentials read-only, SSO/CLI cache read-write (shared
+    # across host + all containers so you only run `aws sso login` once)
+    if [[ -d "$HOME/.aws" ]]; then
+        [[ -f "$HOME/.aws/config" ]] && \
+            host_mounts+=(-v "$HOME/.aws/config":/home/claude/.aws/config:ro)
+        [[ -f "$HOME/.aws/credentials" ]] && \
+            host_mounts+=(-v "$HOME/.aws/credentials":/home/claude/.aws/credentials:ro)
+        mkdir -p "$HOME/.aws/cli/cache" "$HOME/.aws/sso/cache"
+        host_mounts+=(-v "$HOME/.aws/cli/cache":/home/claude/.aws/cli/cache)
+        host_mounts+=(-v "$HOME/.aws/sso/cache":/home/claude/.aws/sso/cache)
+    fi
 
     # SSH agent forwarding (if running)
     if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
@@ -182,7 +336,8 @@ run_container() {
     if [[ -n "$forecast_bin" && -f "$forecast_bin" ]]; then
         forecast_mounts+=(-v "$forecast_bin":/usr/local/bin/forecast:ro)
         # Mount project-specific .forecast config if it exists
-        local forecast_cfg="$full_path/.forecast"
+        # Always use the main repo path (worktrees won't have .forecast since it's gitignored)
+        local forecast_cfg="$PROJECTS_DIR/$project_dir/.forecast"
         if [[ -d "$forecast_cfg" ]]; then
             forecast_mounts+=(-v "$forecast_cfg":/workspace/.forecast:ro)
         fi
@@ -208,25 +363,96 @@ run_container() {
         secrets_env_flag+=(--env-file "$SCRIPT_DIR/secrets.env")
     fi
 
-    # Remove any stopped container with the same name
-    docker rm "$container_name" &>/dev/null || true
+    # Shared cache volumes (persist across container restarts)
+    local cache_mounts=(
+        -v claude-cache-npm:/home/claude/.npm
+        -v claude-cache-go:/home/claude/go/pkg/mod
+        -v claude-cache-pip:/home/claude/.cache/pip
+        -v claude-cache-playwright:/home/claude/.cache/ms-playwright
+    )
+
+    # Kubernetes — mount kube config + minikube certs at the same absolute
+    # paths so cert references in kubeconfig resolve inside the container.
+    # Config is read-write because minikube/kubectl need to update contexts.
+    if [[ "${HOST_NETWORK}" == "true" || "${DOCKER_SOCKET}" == "true" ]]; then
+        [[ -f "$HOME/.kube/config" ]] && \
+            host_mounts+=(-v "$HOME/.kube/config":/home/claude/.kube/config)
+        [[ -d "$HOME/.minikube" ]] && \
+            host_mounts+=(-v "$HOME/.minikube":"$HOME/.minikube":ro)
+    fi
+
+    # Minikube docker-env (for Tilt to discover minikube's Docker daemon)
+    local minikube_flags=()
+    if [[ "${HOST_NETWORK}" == "true" ]] && command -v minikube &>/dev/null; then
+        local mk_env
+        mk_env=$(minikube docker-env 2>/dev/null || true)
+        if [[ -n "$mk_env" ]]; then
+            local mk_host mk_cert mk_ip mk_ver
+            mk_host=$(echo "$mk_env" | grep DOCKER_HOST | sed 's/.*"\(.*\)"/\1/')
+            mk_cert=$(echo "$mk_env" | grep DOCKER_CERT_PATH | sed 's/.*"\(.*\)"/\1/')
+            mk_ip=$(minikube ip 2>/dev/null || echo "192.168.49.2")
+            mk_ver=$(minikube version --short 2>/dev/null || echo "v1.38.0")
+            minikube_flags+=(
+                -e "MINIKUBE_DOCKER_HOST=$mk_host"
+                -e "MINIKUBE_CERT_PATH=$mk_cert"
+                -e "MINIKUBE_IP=$mk_ip"
+                -e "MINIKUBE_VERSION=$mk_ver"
+            )
+        fi
+    fi
+
+    # Network mode
+    local network_flags=()
+    if [[ "${HOST_NETWORK}" == "true" ]]; then
+        network_flags+=(--network host)
+    elif [[ "${OFFLINE}" == "true" ]]; then
+        network_flags+=(--network none)
+    fi
+
+    # Stop and remove any existing container with the same name
+    docker rm -f "$container_name" &>/dev/null || true
 
     exec docker run --rm -it \
         --name "$container_name" \
+        --hostname "claude-${project_key}" \
+        --memory "$CONTAINER_MEMORY" \
+        --cpus "$CONTAINER_CPUS" \
         -v "$full_path":/workspace \
         "${git_mounts[@]}" \
         -v "${config_vol}":/home/claude/.claude \
+        -v "${base_config_vol}":/home/claude/.claude-base:ro \
+        "${cache_mounts[@]}" \
         "${host_mounts[@]}" \
         "${roles_mounts[@]}" \
         "${forecast_mounts[@]}" \
         ${secrets_env_flag[@]+"${secrets_env_flag[@]}"} \
+        ${network_flags[@]+"${network_flags[@]}"} \
+        ${minikube_flags[@]+"${minikube_flags[@]}"} \
         -e TERM="${TERM:-xterm-256color}" \
+        -e CLAUDE_PROJECT="${project_key}" \
         "${extra_flags[@]}" \
         "$IMAGE_NAME" \
         "$@"
 }
 
 # --- Main ---
+
+if [[ $# -eq 0 ]]; then
+    usage
+fi
+
+# Parse modifier flags (before command/project)
+DOCKER_SOCKET="${MOUNT_DOCKER_SOCKET:-false}"
+HOST_NETWORK=false
+OFFLINE=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --docker) DOCKER_SOCKET=true; shift ;;
+        --host-network) HOST_NETWORK=true; DOCKER_SOCKET=true; shift ;;
+        --offline) OFFLINE=true; shift ;;
+        *) break ;;
+    esac
+done
 
 if [[ $# -eq 0 ]]; then
     usage
@@ -252,7 +478,15 @@ case "$1" in
         MODE=worktree run_container "$project" "$@"
         ;;
     --list)
-        docker ps --filter "name=claude-" --format "table {{.Names}}\t{{.Status}}\t{{.RunningFor}}"
+        list_containers
+        ;;
+    --stop)
+        [[ $# -lt 3 ]] && { echo "Usage: claude-in-container --stop <project> <name>"; exit 1; }
+        stop_worktree "$2" "$3"
+        ;;
+    --prune)
+        [[ $# -lt 2 ]] && { echo "Usage: claude-in-container --prune <project>"; exit 1; }
+        prune_worktrees "$2"
         ;;
     -h|--help)
         usage
