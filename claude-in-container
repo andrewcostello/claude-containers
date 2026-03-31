@@ -417,6 +417,7 @@ run_container() {
         --hostname "claude-${project_key}" \
         --memory "$CONTAINER_MEMORY" \
         --cpus "$CONTAINER_CPUS" \
+        --tmpfs /worktrees:exec \
         -v "$full_path":/workspace \
         "${git_mounts[@]}" \
         -v "${config_vol}":/home/claude/.claude \
