@@ -19,6 +19,14 @@ fi
 git config --file "$HOME/.gitconfig.local" --add safe.directory '*'
 export GIT_CONFIG_GLOBAL="$HOME/.gitconfig.local"
 
+# Fix ownership of directories Docker may have created as root
+# (happens when bind-mounting a file into a non-existent parent dir)
+for dir in "$HOME/.kube" "$HOME/.aws"; do
+    if [ -d "$dir" ] && [ ! -w "$dir" ]; then
+        sudo chown "$(id -u):$(id -g)" "$dir"
+    fi
+done
+
 # Sync config from base project volume.
 # ~/.claude-base is the base project config volume (read-only), containing
 # auth credentials, settings, plugins, etc. from the main container.
