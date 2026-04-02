@@ -3,6 +3,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Windows (Git Bash / MSYS2) support
+IS_WINDOWS=false
+if [[ "$(uname -o 2>/dev/null)" == "Msys" ]]; then
+    IS_WINDOWS=true
+    export MSYS_NO_PATHCONV=1
+fi
+
+winpath() {
+    if [[ "$IS_WINDOWS" == "true" ]]; then
+        echo "$1" | sed -E 's|^/([a-zA-Z])/|\U\1:/|'
+    else
+        echo "$1"
+    fi
+}
+
 echo "=== claude-containers setup ==="
 echo ""
 
@@ -56,24 +71,41 @@ done
 # 4. Build the Docker image
 echo ""
 echo "Building Docker image..."
-docker build \
-    --build-arg HOST_UID="$(id -u)" \
-    --build-arg HOST_GID="$(id -g)" \
-    --build-arg DOCKER_GID="$(getent group docker | cut -d: -f3)" \
-    -t claude-dev \
-    "$SCRIPT_DIR"
+if [[ "$IS_WINDOWS" == "true" ]]; then
+    docker build \
+        --build-arg HOST_UID=1000 \
+        --build-arg HOST_GID=1000 \
+        --build-arg DOCKER_GID=999 \
+        -t claude-dev \
+        "$(winpath "$SCRIPT_DIR")"
+else
+    docker build \
+        --build-arg HOST_UID="$(id -u)" \
+        --build-arg HOST_GID="$(id -g)" \
+        --build-arg DOCKER_GID="$(getent group docker | cut -d: -f3)" \
+        -t claude-dev \
+        "$SCRIPT_DIR"
+fi
 
 # 5. Symlink to PATH
 echo ""
-BIN_DIR="$HOME/.local/bin"
-mkdir -p "$BIN_DIR"
-ln -sf "$SCRIPT_DIR/claude-in-container" "$BIN_DIR/claude-in-container"
-echo "Symlinked claude-in-container to $BIN_DIR/"
-
-if ! echo "$PATH" | grep -q "$BIN_DIR"; then
-    echo ""
-    echo "NOTE: $BIN_DIR is not in your PATH. Add it:"
-    echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
+if [[ "$IS_WINDOWS" == "true" ]]; then
+    echo "Add this directory to your Git Bash PATH in ~/.bashrc:"
+    echo "  export PATH=\"$SCRIPT_DIR:\$PATH\""
+    if ! echo "$PATH" | grep -q "$(basename "$SCRIPT_DIR")"; then
+        echo ""
+        echo "NOTE: $SCRIPT_DIR is not in your PATH yet."
+    fi
+else
+    BIN_DIR="$HOME/.local/bin"
+    mkdir -p "$BIN_DIR"
+    ln -sf "$SCRIPT_DIR/claude-in-container" "$BIN_DIR/claude-in-container"
+    echo "Symlinked claude-in-container to $BIN_DIR/"
+    if ! echo "$PATH" | grep -q "$BIN_DIR"; then
+        echo ""
+        echo "NOTE: $BIN_DIR is not in your PATH. Add it:"
+        echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
+    fi
 fi
 
 # 6. GitHub CLI token (optional)

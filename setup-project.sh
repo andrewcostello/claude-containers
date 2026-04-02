@@ -3,6 +3,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Windows (Git Bash / MSYS2) support
+IS_WINDOWS=false
+if [[ "$(uname -o 2>/dev/null)" == "Msys" ]]; then
+    IS_WINDOWS=true
+    export MSYS_NO_PATHCONV=1
+fi
+
+winpath() {
+    if [[ "$IS_WINDOWS" == "true" ]]; then
+        echo "$1" | sed -E 's|^/([a-zA-Z])/|\U\1:/|'
+    else
+        echo "$1"
+    fi
+}
+
 # Colors
 BOLD='\033[1m'
 GREEN='\033[0;32m'
@@ -327,12 +342,21 @@ fi
 
 if [[ "$DO_BUILD" == "true" ]]; then
     echo "Building..."
-    docker build \
-        --build-arg HOST_UID="$(id -u)" \
-        --build-arg HOST_GID="$(id -g)" \
-        --build-arg DOCKER_GID="$(getent group docker | cut -d: -f3)" \
-        -t claude-dev \
-        "$SCRIPT_DIR"
+    if [[ "$IS_WINDOWS" == "true" ]]; then
+        docker build \
+            --build-arg HOST_UID=1000 \
+            --build-arg HOST_GID=1000 \
+            --build-arg DOCKER_GID=999 \
+            -t claude-dev \
+            "$(winpath "$SCRIPT_DIR")"
+    else
+        docker build \
+            --build-arg HOST_UID="$(id -u)" \
+            --build-arg HOST_GID="$(id -g)" \
+            --build-arg DOCKER_GID="$(getent group docker | cut -d: -f3)" \
+            -t claude-dev \
+            "$SCRIPT_DIR"
+    fi
 fi
 
 # ========================================

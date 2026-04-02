@@ -4,6 +4,23 @@ set -euo pipefail
 IMAGE_NAME="claude-dev"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
+# Windows (Git Bash / MSYS2) support
+IS_WINDOWS=false
+if [[ "$(uname -o 2>/dev/null)" == "Msys" ]]; then
+    IS_WINDOWS=true
+    export MSYS_NO_PATHCONV=1
+fi
+
+# Convert MSYS paths (/c/Users/...) to Windows paths (C:/Users/...) for Docker mounts.
+# On Linux this is a no-op. Docker Desktop on Windows needs C:/ style paths.
+winpath() {
+    if [[ "$IS_WINDOWS" == "true" ]]; then
+        echo "$1" | sed -E 's|^/([a-zA-Z])/|\U\1:/|'
+    else
+        echo "$1"
+    fi
+}
+
 # Load machine-specific config
 if [[ -f "$SCRIPT_DIR/config.sh" ]]; then
     source "$SCRIPT_DIR/config.sh"
@@ -53,12 +70,24 @@ usage() {
 
 build_image() {
     echo "Building $IMAGE_NAME image..."
+    local host_uid host_gid docker_gid build_context
+    if [[ "$IS_WINDOWS" == "true" ]]; then
+        host_uid=1000
+        host_gid=1000
+        docker_gid=999
+        build_context="$(winpath "$SCRIPT_DIR")"
+    else
+        host_uid="$(id -u)"
+        host_gid="$(id -g)"
+        docker_gid="$(getent group docker | cut -d: -f3)"
+        build_context="$SCRIPT_DIR"
+    fi
     docker build \
-        --build-arg HOST_UID="$(id -u)" \
-        --build-arg HOST_GID="$(id -g)" \
-        --build-arg DOCKER_GID="$(getent group docker | cut -d: -f3)" \
+        --build-arg HOST_UID="$host_uid" \
+        --build-arg HOST_GID="$host_gid" \
+        --build-arg DOCKER_GID="$docker_gid" \
         -t "$IMAGE_NAME" \
-        "$SCRIPT_DIR"
+        "$build_context"
 }
 
 ensure_image() {
@@ -265,11 +294,11 @@ run_container() {
 
     # Git config
     [[ -f "$HOME/.gitconfig" ]] && \
-        host_mounts+=(-v "$HOME/.gitconfig":/home/claude/.gitconfig:ro)
+        host_mounts+=(-v "$(winpath "$HOME/.gitconfig")":/home/claude/.gitconfig:ro)
 
     # SSH keys (for git over SSH)
     [[ -d "$HOME/.ssh" ]] && \
-        host_mounts+=(-v "$HOME/.ssh":/home/claude/.ssh:ro)
+        host_mounts+=(-v "$(winpath "$HOME/.ssh")":/home/claude/.ssh:ro)
 
     # GitHub CLI auth — token file takes priority, falls back to config dir
     # Create token file with: gh auth token > ~/.config/gh/token
@@ -277,15 +306,15 @@ run_container() {
         host_mounts+=(-e "GH_TOKEN=$(cat "$HOME/.config/gh/token")")
     fi
     [[ -d "$HOME/.config/gh" ]] && \
-        host_mounts+=(-v "$HOME/.config/gh":/home/claude/.config/gh:ro)
+        host_mounts+=(-v "$(winpath "$HOME/.config/gh")":/home/claude/.config/gh:ro)
 
     # Gemini CLI auth (OAuth credentials)
     [[ -d "$HOME/.gemini" ]] && \
-        host_mounts+=(-v "$HOME/.gemini":/home/claude/.gemini:ro)
+        host_mounts+=(-v "$(winpath "$HOME/.gemini")":/home/claude/.gemini:ro)
 
     # OpenAI Codex CLI auth
     [[ -d "$HOME/.codex" ]] && \
-        host_mounts+=(-v "$HOME/.codex":/home/claude/.codex:ro)
+        host_mounts+=(-v "$(winpath "$HOME/.codex")":/home/claude/.codex:ro)
 
     # Docker socket (only when explicitly requested — it grants host-level access)
     # Enable via: --docker flag, MOUNT_DOCKER_SOCKET=true, or per-project DOCKER_PROJECTS
@@ -296,30 +325,34 @@ run_container() {
         done
     fi
     if [[ "$needs_docker" == "true" ]]; then
-        [[ -S /var/run/docker.sock ]] && \
-            host_mounts+=(-v /var/run/docker.sock:/var/run/docker.sock)
+        if [[ "$IS_WINDOWS" == "true" ]]; then
+            host_mounts+=(-v //var/run/docker.sock:/var/run/docker.sock)
+        else
+            [[ -S /var/run/docker.sock ]] && \
+                host_mounts+=(-v /var/run/docker.sock:/var/run/docker.sock)
+        fi
         [[ -d "$HOME/.docker" ]] && \
-            host_mounts+=(-v "$HOME/.docker":/home/claude/.docker:ro)
+            host_mounts+=(-v "$(winpath "$HOME/.docker")":/home/claude/.docker:ro)
     fi
 
     # GCloud (if present)
     [[ -d "$HOME/.config/gcloud" ]] && \
-        host_mounts+=(-v "$HOME/.config/gcloud":/home/claude/.config/gcloud:ro)
+        host_mounts+=(-v "$(winpath "$HOME/.config/gcloud")":/home/claude/.config/gcloud:ro)
 
     # AWS — config/credentials read-only, SSO/CLI cache read-write (shared
     # across host + all containers so you only run `aws sso login` once)
     if [[ -d "$HOME/.aws" ]]; then
         [[ -f "$HOME/.aws/config" ]] && \
-            host_mounts+=(-v "$HOME/.aws/config":/home/claude/.aws/config:ro)
+            host_mounts+=(-v "$(winpath "$HOME/.aws/config")":/home/claude/.aws/config:ro)
         [[ -f "$HOME/.aws/credentials" ]] && \
-            host_mounts+=(-v "$HOME/.aws/credentials":/home/claude/.aws/credentials:ro)
+            host_mounts+=(-v "$(winpath "$HOME/.aws/credentials")":/home/claude/.aws/credentials:ro)
         mkdir -p "$HOME/.aws/cli/cache" "$HOME/.aws/sso/cache"
-        host_mounts+=(-v "$HOME/.aws/cli/cache":/home/claude/.aws/cli/cache)
-        host_mounts+=(-v "$HOME/.aws/sso/cache":/home/claude/.aws/sso/cache)
+        host_mounts+=(-v "$(winpath "$HOME/.aws/cli/cache")":/home/claude/.aws/cli/cache)
+        host_mounts+=(-v "$(winpath "$HOME/.aws/sso/cache")":/home/claude/.aws/sso/cache)
     fi
 
     # SSH agent forwarding (if running)
-    if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
+    if [[ "$IS_WINDOWS" != "true" ]] && [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
         host_mounts+=(-v "$SSH_AUTH_SOCK":/tmp/ssh-agent.sock)
         host_mounts+=(-e SSH_AUTH_SOCK=/tmp/ssh-agent.sock)
     fi
@@ -327,19 +360,19 @@ run_container() {
     # Shared Claude roles (read-only)
     local roles_mounts=()
     if [[ -d "$ROLES_DIR" ]]; then
-        roles_mounts+=(-v "$ROLES_DIR":/workspace/.claude/roles:ro)
+        roles_mounts+=(-v "$(winpath "$ROLES_DIR")":/workspace/.claude/roles:ro)
     fi
 
     # Forecast CLI — mount binary + per-project config
     local forecast_mounts=()
     local forecast_bin="${FORECAST_BIN:-}"
     if [[ -n "$forecast_bin" && -f "$forecast_bin" ]]; then
-        forecast_mounts+=(-v "$forecast_bin":/usr/local/bin/forecast:ro)
+        forecast_mounts+=(-v "$(winpath "$forecast_bin")":/usr/local/bin/forecast:ro)
         # Mount project-specific .forecast config if it exists
         # Always use the main repo path (worktrees won't have .forecast since it's gitignored)
         local forecast_cfg="$PROJECTS_DIR/$project_dir/.forecast"
         if [[ -d "$forecast_cfg" ]]; then
-            forecast_mounts+=(-v "$forecast_cfg":/workspace/.forecast:ro)
+            forecast_mounts+=(-v "$(winpath "$forecast_cfg")":/workspace/.forecast:ro)
         fi
     fi
 
@@ -353,14 +386,14 @@ run_container() {
         if [[ -n "$main_git_dir" && -d "$main_git_dir" ]]; then
             main_git_dir=$(cd "$full_path" && cd "$main_git_dir" && pwd)
             # Mount at the same absolute path so worktree gitdir references work
-            git_mounts+=(-v "$main_git_dir":"$main_git_dir")
+            git_mounts+=(-v "$(winpath "$main_git_dir")":"$main_git_dir")
         fi
     fi
 
     # Secrets env file (JIRA_API_TOKEN, etc.)
     local secrets_env_flag=()
     if [[ -f "$SCRIPT_DIR/secrets.env" ]]; then
-        secrets_env_flag+=(--env-file "$SCRIPT_DIR/secrets.env")
+        secrets_env_flag+=(--env-file "$(winpath "$SCRIPT_DIR/secrets.env")")
     fi
 
     # Shared cache volumes (persist across container restarts)
@@ -376,9 +409,9 @@ run_container() {
     # Config is read-write because minikube/kubectl need to update contexts.
     if [[ "${HOST_NETWORK}" == "true" || "${DOCKER_SOCKET}" == "true" ]]; then
         [[ -f "$HOME/.kube/config" ]] && \
-            host_mounts+=(-v "$HOME/.kube/config":/home/claude/.kube/config)
+            host_mounts+=(-v "$(winpath "$HOME/.kube/config")":/home/claude/.kube/config)
         [[ -d "$HOME/.minikube" ]] && \
-            host_mounts+=(-v "$HOME/.minikube":"$HOME/.minikube":ro)
+            host_mounts+=(-v "$(winpath "$HOME/.minikube")":"$HOME/.minikube":ro)
     fi
 
     # Minikube docker-env (for Tilt to discover minikube's Docker daemon)
@@ -425,7 +458,7 @@ run_container() {
         --memory "$CONTAINER_MEMORY" \
         --cpus "$CONTAINER_CPUS" \
         --tmpfs /worktrees:exec \
-        -v "$full_path":/workspace \
+        -v "$(winpath "$full_path")":/workspace \
         "${git_mounts[@]}" \
         -v "${config_vol}":/home/claude/.claude \
         -v "${base_config_vol}":/home/claude/.claude-base:ro \
