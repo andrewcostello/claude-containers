@@ -132,7 +132,7 @@ if ! command -v gh &>/dev/null; then
     prompt_yn INSTALL_GH "Install GitHub CLI? (for PR/issue workflows)" "y"
     if [[ "$INSTALL_GH" == "true" ]]; then
         echo "Installing GitHub CLI..."
-        cmd.exe //c "winget install --id GitHub.cli --accept-source-agreements --accept-package-agreements"
+        winget install --id GitHub.cli --accept-source-agreements --accept-package-agreements
         echo -e "${GREEN}GitHub CLI installed. Restart Git Bash to pick it up.${NC}"
     fi
 else
@@ -144,7 +144,7 @@ if ! command -v aws &>/dev/null; then
     prompt_yn INSTALL_AWS "Install AWS CLI? (for AWS credential sharing)" "n"
     if [[ "$INSTALL_AWS" == "true" ]]; then
         echo "Installing AWS CLI..."
-        cmd.exe //c "winget install --id Amazon.AWSCLI --accept-source-agreements --accept-package-agreements"
+        winget install --id Amazon.AWSCLI --accept-source-agreements --accept-package-agreements
         echo -e "${GREEN}AWS CLI installed. Restart Git Bash to pick it up.${NC}"
     fi
 else
@@ -156,7 +156,7 @@ if ! command -v minikube &>/dev/null; then
     prompt_yn INSTALL_MK "Install minikube? (only if you do local Kubernetes dev)" "n"
     if [[ "$INSTALL_MK" == "true" ]]; then
         echo "Installing minikube..."
-        cmd.exe //c "winget install --id Kubernetes.minikube --accept-source-agreements --accept-package-agreements"
+        winget install --id Kubernetes.minikube --accept-source-agreements --accept-package-agreements
         echo -e "${GREEN}minikube installed.${NC}"
     fi
 else
