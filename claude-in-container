@@ -384,9 +384,15 @@ run_container() {
     # Minikube docker-env (for Tilt to discover minikube's Docker daemon)
     local minikube_flags=()
     if [[ "${HOST_NETWORK}" == "true" ]] && command -v minikube &>/dev/null; then
+        # Start minikube if it isn't running
+        if ! minikube status --format='{{.Host}}' 2>/dev/null | grep -q Running; then
+            echo "Starting minikube..."
+            minikube start
+        fi
+
         local mk_env
-        mk_env=$(minikube docker-env 2>/dev/null || true)
-        if [[ -n "$mk_env" ]]; then
+        mk_env=$(minikube docker-env 2>/dev/null) || true
+        if [[ -n "$mk_env" ]] && echo "$mk_env" | grep -q DOCKER_HOST; then
             local mk_host mk_cert mk_ip mk_ver
             mk_host=$(echo "$mk_env" | grep DOCKER_HOST | sed 's/.*"\(.*\)"/\1/')
             mk_cert=$(echo "$mk_env" | grep DOCKER_CERT_PATH | sed 's/.*"\(.*\)"/\1/')
@@ -415,6 +421,7 @@ run_container() {
     exec docker run --rm -it \
         --name "$container_name" \
         --hostname "claude-${project_key}" \
+        --add-host "claude-${project_key}:127.0.0.1" \
         --memory "$CONTAINER_MEMORY" \
         --cpus "$CONTAINER_CPUS" \
         --tmpfs /worktrees:exec \
