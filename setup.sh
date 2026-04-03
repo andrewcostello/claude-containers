@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
+    for _b in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        [[ -x "$_b" ]] && exec "$_b" "$0" "$@"
+    done
+    echo "Error: bash 4+ required. Run: brew install bash" >&2; exit 1
+fi
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
