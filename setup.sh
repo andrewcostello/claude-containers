@@ -82,7 +82,7 @@ else
     docker build \
         --build-arg HOST_UID="$(id -u)" \
         --build-arg HOST_GID="$(id -g)" \
-        --build-arg DOCKER_GID="$(getent group docker | cut -d: -f3)" \
+        --build-arg DOCKER_GID="$(getent group docker 2>/dev/null | cut -d: -f3 || echo "999")" \
         -t claude-dev \
         "$SCRIPT_DIR"
 fi
@@ -104,7 +104,8 @@ else
     if ! echo "$PATH" | grep -q "$BIN_DIR"; then
         echo ""
         echo "NOTE: $BIN_DIR is not in your PATH. Add it:"
-        echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
+        echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc   # macOS"
+        echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc  # Linux"
     fi
 fi
 
