@@ -91,7 +91,7 @@ build_image() {
     else
         host_uid="$(id -u)"
         host_gid="$(id -g)"
-        docker_gid="$(getent group docker | cut -d: -f3)"
+        docker_gid="$(getent group docker 2>/dev/null | cut -d: -f3 || echo "999")"
         build_context="$SCRIPT_DIR"
     fi
     docker build \
