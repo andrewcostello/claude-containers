@@ -73,8 +73,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends sudo \
 # Pre-create .claude dir owned by claude user so volume mounts inherit ownership
 RUN mkdir -p /home/claude/.claude && chown -R ${HOST_UID}:${HOST_GID} /home/claude/.claude
 
-# AWS CLI v2
-RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
+# AWS CLI v2 (arch-aware: x86_64 on Intel, aarch64 on Apple Silicon)
+RUN ARCH=$(uname -m) && \
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH}.zip" -o /tmp/awscliv2.zip \
     && unzip -q /tmp/awscliv2.zip -d /tmp \
     && /tmp/aws/install \
     && rm -rf /tmp/aws /tmp/awscliv2.zip
