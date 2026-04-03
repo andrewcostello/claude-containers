@@ -353,7 +353,7 @@ if [[ "$DO_BUILD" == "true" ]]; then
         docker build \
             --build-arg HOST_UID="$(id -u)" \
             --build-arg HOST_GID="$(id -g)" \
-            --build-arg DOCKER_GID="$(getent group docker 2>/dev/null | cut -d: -f3 || echo "999")" \
+            --build-arg DOCKER_GID="$(gid="$(getent group docker 2>/dev/null | cut -d: -f3)"; echo "${gid:-999}")" \
             -t claude-dev \
             "$SCRIPT_DIR"
     fi
