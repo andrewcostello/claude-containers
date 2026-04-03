@@ -112,7 +112,7 @@ claude-in-container --docker --host-network --worktree myapp feature-x
 | Flag | Effect |
 |------|--------|
 | `--docker` | Mounts Docker socket + Docker config |
-| `--host-network` | Uses host network, mounts kube/minikube config, creates minikube shim. Implies `--docker` |
+| `--host-network` | Uses host network, mounts kube/minikube config, creates minikube shim. Implies `--docker`. **macOS:** Docker Desktop runs in a VM so `--network host` gives the container the VM's network, not the Mac's — use `host.docker.internal` to reach Mac-side services instead. |
 | `--offline` | Sets `--network none` on the container |
 
 ### Worktrees — multiple agents on one project
@@ -141,6 +141,8 @@ Each worktree gets:
 - Dependencies auto-installed if `node_modules` is missing
 
 ### Kubernetes / Tilt with minikube
+
+> **macOS note:** `--network host` is not supported by Docker Desktop for Mac (the daemon runs in a VM). Use `host.docker.internal` to reach Mac-side port-forwards from the container (e.g. `http://host.docker.internal:10350` for Tilt's web UI).
 
 For local Kubernetes development, run minikube on the **host** (not in the container):
 
