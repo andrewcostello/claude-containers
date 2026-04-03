@@ -2,7 +2,15 @@
 set -euo pipefail
 
 IMAGE_NAME="claude-dev"
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# Resolve symlinks portably — macOS readlink does not support -f
+_src="${BASH_SOURCE[0]}"
+while [[ -L "$_src" ]]; do
+    _dir="$(cd -P "$(dirname "$_src")" && pwd)"
+    _src="$(readlink "$_src")"
+    [[ "$_src" != /* ]] && _src="$_dir/$_src"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$_src")" && pwd)"
+unset _src _dir
 
 # Windows (Git Bash / MSYS2) support
 IS_WINDOWS=false
