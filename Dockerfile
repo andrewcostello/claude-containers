@@ -86,8 +86,9 @@ RUN npm install -g @google/gemini-cli
 # OpenAI Codex CLI (for multi-model reviews)
 RUN npm install -g @openai/codex
 
-# kubectl
-RUN curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+# kubectl (arch-aware: amd64 on Intel, arm64 on Apple Silicon)
+RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
+    curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/${ARCH}/kubectl" \
     -o /usr/local/bin/kubectl && chmod +x /usr/local/bin/kubectl
 
 # Tilt (local Kubernetes dev)
