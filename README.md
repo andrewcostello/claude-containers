@@ -112,7 +112,7 @@ claude-in-container --docker --host-network --worktree myapp feature-x
 | Flag | Effect |
 |------|--------|
 | `--docker` | Mounts Docker socket + Docker config |
-| `--host-network` | Uses host network, mounts kube/minikube config, creates minikube shim. Implies `--docker`. **macOS:** Docker Desktop runs in a VM so `--network host` gives the container the VM's network, not the Mac's — use `host.docker.internal` to reach Mac-side services instead. |
+| `--host-network` | Uses host network, mounts kube/minikube config, creates minikube shim (Linux/Windows). Implies `--docker`. **macOS:** requires [OrbStack](https://orbstack.dev) — use its built-in Kubernetes instead of minikube (no shim needed). |
 | `--offline` | Sets `--network none` on the container |
 
 ### Worktrees — multiple agents on one project
@@ -142,9 +142,9 @@ Each worktree gets:
 
 ### Kubernetes / Tilt with minikube
 
-> **macOS note:** `--network host` is not supported by Docker Desktop for Mac (the daemon runs in a VM). Use `host.docker.internal` to reach Mac-side port-forwards from the container (e.g. `http://host.docker.internal:10350` for Tilt's web UI).
+> **macOS:** Use [OrbStack](https://orbstack.dev) instead of Docker Desktop — it provides native `--network host` support. Enable OrbStack's built-in Kubernetes (no minikube needed). The container connects to it directly via `~/.kube/config`; no minikube shim is created.
 
-For local Kubernetes development, run minikube on the **host** (not in the container):
+For local Kubernetes development on **Linux/Windows**, run minikube on the **host** (not in the container):
 
 ```bash
 # On the host — start minikube (one-time)

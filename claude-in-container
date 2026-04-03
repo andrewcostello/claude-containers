@@ -19,6 +19,12 @@ if [[ "$(uname -o 2>/dev/null)" == "Msys" ]]; then
     export MSYS_NO_PATHCONV=1
 fi
 
+# macOS support — OrbStack provides native --network host, uses built-in k8s (no minikube)
+IS_MAC=false
+if [[ "$(uname -s 2>/dev/null)" == "Darwin" ]]; then
+    IS_MAC=true
+fi
+
 # Convert MSYS paths (/c/Users/...) to Windows paths (C:/Users/...) for Docker mounts.
 # On Linux this is a no-op. Docker Desktop on Windows needs C:/ style paths.
 winpath() {
@@ -481,16 +487,21 @@ run_container() {
     # Kubernetes — mount kube config + minikube certs at the same absolute
     # paths so cert references in kubeconfig resolve inside the container.
     # Config is read-write because minikube/kubectl need to update contexts.
+    # macOS: OrbStack k8s writes its context to ~/.kube/config — no minikube dir needed.
     if [[ "${HOST_NETWORK}" == "true" || "${DOCKER_SOCKET}" == "true" ]]; then
         [[ -f "$HOME/.kube/config" ]] && \
             host_mounts+=(-v "$(winpath "$HOME/.kube/config")":/home/claude/.kube/config)
-        [[ -d "$HOME/.minikube" ]] && \
-            host_mounts+=(-v "$(winpath "$HOME/.minikube")":"$HOME/.minikube":ro)
+        if [[ "$IS_MAC" != "true" ]]; then
+            [[ -d "$HOME/.minikube" ]] && \
+                host_mounts+=(-v "$(winpath "$HOME/.minikube")":"$HOME/.minikube":ro)
+        fi
     fi
 
     # Minikube docker-env (for Tilt to discover minikube's Docker daemon)
+    # macOS: OrbStack provides native --network host so no shim is needed — kubectl
+    # and Tilt connect to OrbStack k8s directly via ~/.kube/config.
     local minikube_flags=()
-    if [[ "${HOST_NETWORK}" == "true" ]] && command -v minikube &>/dev/null; then
+    if [[ "$IS_MAC" != "true" ]] && [[ "${HOST_NETWORK}" == "true" ]] && command -v minikube &>/dev/null; then
         # Start minikube if it isn't running
         if ! minikube status --format='{{.Host}}' 2>/dev/null | grep -q Running; then
             echo "Starting minikube..."
