@@ -65,6 +65,10 @@ usage() {
     echo "Multiple instances:"
     echo "  claude-in-container --worktree evenplay wallet-fix"
     echo "  claude-in-container --worktree evenplay auth-refactor"
+    echo ""
+    echo "PR review (URL or shorthand):"
+    echo "  claude-in-container --worktree evenplay pr-42"
+    echo "  claude-in-container --review https://github.com/org/repo/pull/42"
     exit 1
 }
 
@@ -106,6 +110,44 @@ resolve_project() {
         echo "" >&2
         usage
     fi
+}
+
+# Find the project key whose origin matches a given GitHub owner/repo.
+# Falls back to cloning the repo and registering it as a temporary project.
+find_or_clone_project() {
+    local owner="$1" repo="$2"
+    local match_url="github.com/${owner}/${repo}"
+
+    # Check configured projects for a matching remote
+    for key in "${!PROJECTS[@]}"; do
+        local dir="$PROJECTS_DIR/${PROJECTS[$key]}"
+        [[ -d "$dir/.git" || -f "$dir/.git" ]] || continue
+        local remote_url
+        remote_url=$(git -C "$dir" remote get-url origin 2>/dev/null) || continue
+        if [[ "$remote_url" == *"$match_url"* ]]; then
+            echo "$key"
+            return
+        fi
+    done
+
+    # Not found — look for an existing clone at PROJECTS_DIR/<repo>
+    local clone_dir="$PROJECTS_DIR/$repo"
+    if [[ -d "$clone_dir/.git" ]]; then
+        local remote_url
+        remote_url=$(git -C "$clone_dir" remote get-url origin 2>/dev/null) || true
+        if [[ "$remote_url" == *"$match_url"* ]]; then
+            # Register as a runtime project so the rest of the script works
+            PROJECTS["$repo"]="$repo"
+            echo "$repo"
+            return
+        fi
+    fi
+
+    # Clone it fresh
+    echo "Cloning ${owner}/${repo} into $clone_dir..." >&2
+    git clone "https://github.com/${owner}/${repo}.git" "$clone_dir" >&2
+    PROJECTS["$repo"]="$repo"
+    echo "$repo"
 }
 
 prune_worktrees() {
@@ -258,14 +300,38 @@ run_container() {
     if [[ "${MODE:-}" == "worktree" ]] && [[ -n "$instance" ]]; then
         local wt_path="$PROJECTS_DIR/${project_dir}-wt-${instance}"
         if [[ ! -d "$wt_path" ]]; then
-            # Fetch latest main first
-            echo "Fetching latest main..."
-            git -C "$full_path" fetch origin main 2>/dev/null || true
-            echo "Creating worktree: $wt_path (branch: $instance from origin/main)"
-            git -C "$full_path" worktree add "$wt_path" -b "$instance" origin/main 2>/dev/null \
-                || git -C "$full_path" worktree add "$wt_path" "$instance"
+            # Fetch latest first
+            echo "Fetching latest from origin..."
+            git -C "$full_path" fetch origin 2>/dev/null || true
+
+            # If instance looks like a PR reference (PR-123, PR123, pr-123, etc.),
+            # resolve the PR's head branch and check that out instead
+            local pr_number=""
+            local pr_branch=""
+            if [[ "$instance" =~ ^[Pp][Rr]-?([0-9]+)$ ]]; then
+                pr_number="${BASH_REMATCH[1]}"
+                echo "Resolving PR #${pr_number} branch..."
+                pr_branch=$(gh pr view "$pr_number" \
+                    --repo "$(git -C "$full_path" remote get-url origin)" \
+                    --json headRefName --jq '.headRefName' 2>&1) \
+                    || { echo "Error: could not resolve PR #${pr_number}: $pr_branch"; exit 1; }
+                echo "PR #${pr_number} -> branch: $pr_branch"
+                git -C "$full_path" fetch origin "$pr_branch" 2>/dev/null || true
+                echo "Creating worktree: $wt_path (tracking PR #${pr_number} branch: $pr_branch)"
+                git -C "$full_path" worktree add "$wt_path" -b "$instance" "origin/$pr_branch" 2>/dev/null \
+                    || git -C "$full_path" worktree add "$wt_path" "origin/$pr_branch"
+                PR_REVIEW_NUM="$pr_number"
+            else
+                echo "Creating worktree: $wt_path (branch: $instance from origin/main)"
+                git -C "$full_path" worktree add "$wt_path" -b "$instance" origin/main 2>/dev/null \
+                    || git -C "$full_path" worktree add "$wt_path" "$instance"
+            fi
         else
             echo "Using existing worktree: $wt_path"
+            # Still detect PR pattern for role injection on reuse
+            if [[ "$instance" =~ ^[Pp][Rr]-?([0-9]+)$ ]]; then
+                PR_REVIEW_NUM="${BASH_REMATCH[1]}"
+            fi
         fi
         full_path="$wt_path"
     fi
@@ -451,6 +517,25 @@ run_container() {
     # Stop and remove any existing container with the same name
     docker rm -f "$container_name" &>/dev/null || true
 
+    # Build claude args: if this is a PR worktree and user didn't pass their
+    # own args, auto-inject the pr_reviewer role and a review prompt
+    local claude_args=("$@")
+    if [[ -n "${PR_REVIEW_NUM:-}" ]] && [[ ${#claude_args[@]} -eq 0 ]]; then
+        local role_file="${ROLES_DIR:-}/pr_reviewer.md"
+        if [[ -f "$role_file" ]]; then
+            local role_content
+            role_content=$(<"$role_file")
+            claude_args+=(
+                "--append-system-prompt" "$role_content"
+                "Review PR #${PR_REVIEW_NUM}. Start by reading the PR description and diff."
+            )
+            echo "Auto-loading pr_reviewer role for PR #${PR_REVIEW_NUM}"
+        else
+            claude_args+=("Review PR #${PR_REVIEW_NUM}. Start by reading the PR description and diff.")
+            echo "Note: no pr_reviewer role found at $role_file — using default prompt"
+        fi
+    fi
+
     exec docker run --rm -it \
         --name "$container_name" \
         --hostname "claude-${project_key}" \
@@ -473,7 +558,7 @@ run_container() {
         -e CLAUDE_PROJECT="${project_key}" \
         "${extra_flags[@]}" \
         "$IMAGE_NAME" \
-        "$@"
+        "${claude_args[@]}"
 }
 
 # --- Main ---
@@ -516,6 +601,24 @@ case "$1" in
         project="$2"
         INSTANCE_NAME="$3"
         shift 3
+        MODE=worktree run_container "$project" "$@"
+        ;;
+    --review)
+        [[ $# -lt 2 ]] && { echo "Usage: claude-in-container --review <PR-URL> [claude args...]"; exit 1; }
+        pr_url="$2"
+        shift 2
+        # Parse GitHub PR URL: https://github.com/<owner>/<repo>/pull/<number>
+        if [[ "$pr_url" =~ github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
+            pr_owner="${BASH_REMATCH[1]}"
+            pr_repo="${BASH_REMATCH[2]}"
+            pr_num="${BASH_REMATCH[3]}"
+        else
+            echo "Error: invalid PR URL: $pr_url" >&2
+            echo "Expected: https://github.com/<owner>/<repo>/pull/<number>" >&2
+            exit 1
+        fi
+        project=$(find_or_clone_project "$pr_owner" "$pr_repo")
+        INSTANCE_NAME="pr-${pr_num}"
         MODE=worktree run_container "$project" "$@"
         ;;
     --list)
