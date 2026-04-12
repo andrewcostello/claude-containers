@@ -618,6 +618,10 @@ case "$1" in
             exit 1
         fi
         project=$(find_or_clone_project "$pr_owner" "$pr_repo")
+        # Subshell can't modify PROJECTS — register here if needed
+        if [[ -z "${PROJECTS[$project]+x}" ]]; then
+            PROJECTS["$project"]="$project"
+        fi
         INSTANCE_NAME="pr-${pr_num}"
         MODE=worktree run_container "$project" "$@"
         ;;
