@@ -207,7 +207,7 @@ Default is yes (`--dangerously-skip-permissions`) since the container provides i
 | Docker config | `~/.docker/` | `--docker` flag |
 | Kube config | `~/.kube/config` | `--host-network` or `--docker` |
 | Minikube certs | `~/.minikube/` (host path) | `--host-network` or `--docker` |
-| Claude roles | `/workspace/.claude/roles/` (ro) | If `ROLES_DIR` is configured |
+| Claude roles | `~/.claude/roles/` (ro) | If `ROLES_DIR` is configured |
 | Forecast binary | `/usr/local/bin/forecast` (ro) | If `FORECAST_BIN` is configured |
 | Forecast config | `/workspace/.forecast/` (ro) | If `.forecast/` exists in main repo |
 | SSH agent | `/tmp/ssh-agent.sock` | If `SSH_AUTH_SOCK` is set |

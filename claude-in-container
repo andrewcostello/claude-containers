@@ -77,7 +77,7 @@ usage() {
     echo ""
     echo "Commands:"
     echo "  claude-in-container --build                Rebuild the Docker image"
-    echo "  claude-in-container --login <project>      Run claude auth login in the container"
+    echo "  claude-in-container --login <project>       Run claude setup-token on host (opens browser)"
     echo "  claude-in-container --shell <project>      Open a bash shell in the container"
     echo "  claude-in-container --worktree <project> <name>  Spawn instance on a new git worktree"
     echo "  claude-in-container --list                 List running claude containers"
@@ -362,12 +362,7 @@ run_container() {
     local extra_flags=()
 
     # Handle special modes
-    if [[ "${MODE:-}" == "login" ]]; then
-        # Generate a long-lived OAuth token and add it to secrets.env
-        extra_flags+=("--entrypoint" "entrypoint.sh")
-        set -- "setup-token"
-        echo "Tip: Add the generated token to secrets.env as CLAUDE_CODE_OAUTH_TOKEN=<token>"
-    elif [[ "${MODE:-}" == "shell" ]]; then
+    if [[ "${MODE:-}" == "shell" ]]; then
         extra_flags+=("--entrypoint" "/bin/bash")
         set --
     else
@@ -449,7 +444,7 @@ run_container() {
     # Shared Claude roles (read-only)
     local roles_mounts=()
     if [[ -d "$ROLES_DIR" ]]; then
-        roles_mounts+=(-v "$(winpath "$ROLES_DIR")":/workspace/.claude/roles:ro)
+        roles_mounts+=(-v "$(winpath "$ROLES_DIR")":/home/claude/.claude/roles:ro)
     fi
 
     # Forecast CLI — mount binary + per-project config
@@ -480,9 +475,14 @@ run_container() {
     fi
 
     # Secrets env file (JIRA_API_TOKEN, etc.)
+    # Load shared secrets first, then project-specific overrides (later --env-file wins)
     local secrets_env_flag=()
     if [[ -f "$SCRIPT_DIR/secrets.env" ]]; then
         secrets_env_flag+=(--env-file "$(winpath "$SCRIPT_DIR/secrets.env")")
+    fi
+    local project_secrets="$SCRIPT_DIR/secrets-${project_key}.env"
+    if [[ -f "$project_secrets" ]]; then
+        secrets_env_flag+=(--env-file "$(winpath "$project_secrets")")
     fi
 
     # Shared cache volumes (persist across container restarts)
@@ -589,6 +589,30 @@ run_container() {
         "${claude_args[@]}"
 }
 
+# Run claude setup-token on the host (opens browser) and save token to per-project secrets file
+do_login() {
+    local project_key="$1"
+    local secrets_file="$SCRIPT_DIR/secrets-${project_key}.env"
+    echo "Opening browser for Claude authentication ($project_key)..."
+    claude setup-token
+    echo ""
+    read -r -p "Paste the token above to save to secrets-${project_key}.env (or press Enter to skip): " token </dev/tty
+    if [[ -z "$token" ]]; then
+        echo "Skipped. Add token manually: CLAUDE_CODE_OAUTH_TOKEN=<token> in secrets-${project_key}.env"
+        return
+    fi
+    if grep -q "^CLAUDE_CODE_OAUTH_TOKEN=" "$secrets_file" 2>/dev/null; then
+        local tmp
+        tmp=$(mktemp)
+        sed "s|^CLAUDE_CODE_OAUTH_TOKEN=.*|CLAUDE_CODE_OAUTH_TOKEN=$token|" "$secrets_file" > "$tmp"
+        mv "$tmp" "$secrets_file"
+    else
+        echo "CLAUDE_CODE_OAUTH_TOKEN=$token" >> "$secrets_file"
+    fi
+    chmod 600 "$secrets_file"
+    echo "Token saved to secrets-${project_key}.env"
+}
+
 # --- Main ---
 
 if [[ $# -eq 0 ]]; then
@@ -618,7 +642,7 @@ case "$1" in
         ;;
     --login)
         [[ $# -lt 2 ]] && usage
-        MODE=login run_container "$2"
+        do_login "$2"
         ;;
     --shell)
         [[ $# -lt 2 ]] && usage
