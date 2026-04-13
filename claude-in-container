@@ -590,27 +590,24 @@ run_container() {
 }
 
 # Run claude setup-token on the host (opens browser) and save token to per-project secrets file
+# Run claude interactively in a container backed by the base project volume.
+# The user completes the login wizard once; credentials are saved to the volume
+# and automatically inherited by all future worktree containers.
 do_login() {
     local project_key="$1"
-    local secrets_file="$SCRIPT_DIR/secrets-${project_key}.env"
-    echo "Opening browser for Claude authentication ($project_key)..."
-    claude setup-token
+    local vol_name="claude-config-${project_key}"
+
+    echo "Starting Claude login for project: $project_key"
+    echo "When a URL appears in the terminal, CMD+click (or copy/paste) it into your browser."
+    echo "Log in with the Claude account for this project."
     echo ""
-    read -r -p "Paste the token above to save to secrets-${project_key}.env (or press Enter to skip): " token </dev/tty
-    if [[ -z "$token" ]]; then
-        echo "Skipped. Add token manually: CLAUDE_CODE_OAUTH_TOKEN=<token> in secrets-${project_key}.env"
-        return
-    fi
-    if grep -q "^CLAUDE_CODE_OAUTH_TOKEN=" "$secrets_file" 2>/dev/null; then
-        local tmp
-        tmp=$(mktemp)
-        sed "s|^CLAUDE_CODE_OAUTH_TOKEN=.*|CLAUDE_CODE_OAUTH_TOKEN=$token|" "$secrets_file" > "$tmp"
-        mv "$tmp" "$secrets_file"
-    else
-        echo "CLAUDE_CODE_OAUTH_TOKEN=$token" >> "$secrets_file"
-    fi
-    chmod 600 "$secrets_file"
-    echo "Token saved to secrets-${project_key}.env"
+
+    docker run --rm -it \
+        --name "claude-${project_key}-login" \
+        -v "${vol_name}:/home/claude/.claude" \
+        -e CLAUDE_PROJECT="${project_key}" \
+        "$IMAGE_NAME" \
+        claude
 }
 
 # --- Main ---
